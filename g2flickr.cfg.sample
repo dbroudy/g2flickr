@@ -1,0 +1,7 @@
+[flickr]
+api_key = 
+api_secret = 
+
+[gallery2]
+database = dbname=gallery2 host=localhost user=user password=password
+album_dir = /gallery/albums

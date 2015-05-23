@@ -1,0 +1,161 @@
+#!env python
+
+import os
+from datetime import datetime, timedelta
+import argparse
+from ConfigParser import SafeConfigParser
+import flickrapi
+from requests.packages import urllib3
+import psycopg2 as dbapi2
+
+urllib3.disable_warnings()
+
+
+arg_parser = argparse.ArgumentParser()
+arg_parser.add_argument("-v", "--verbose", help="Print status information. Used multiple times to increase verbosity", action="count")
+arg_parser.add_argument("-a", "--album", help="upload only specified album. Can be used multiple times", action="append", type=int)
+arg_parser.add_argument("-n", "--noact", help="do not upload anything to flickr", action="store_true")
+arg_parser.add_argument("-c", "--config", help="configuration file (defaults to ./g2flickr.cfg)", type=str, default='g2flickr.cfg')
+
+args = arg_parser.parse_args()
+
+config = SafeConfigParser()
+config.read(args.config)
+
+
+sql = """SELECT e.g_id, i.g_title, i.g_description, i.g_summary, i.g_keywords, f.g_pathcomponent, e.g_creationtimestamp, i.g_originationtimestamp
+        FROM g2_entity AS e 
+        INNER JOIN g2_item i ON i.g_id = e.g_id
+        INNER JOIN g2_childentity c ON c.g_id = e.g_id
+        INNER JOIN g2_filesystementity f ON f.g_id = e.g_id
+        WHERE e.g_entitytype=%s AND c.g_parentid=%s
+        ORDER BY e.g_creationtimestamp"""
+
+  
+flickr = flickrapi.FlickrAPI(unicode(config.get('flickr', 'api_key')), unicode(config.get('flickr', 'api_secret')), format='xmlnode')
+
+def create_album(conn, abspath, abstitle, record, indent=''):
+  (id, title, desc, summary, keywords, component, junk, junk) = record
+  path = os.path.join(abspath, component) if component else abspath
+  title = ' - '.join((abstitle, title)) if abstitle else title
+
+  if summary == 'dave':
+    summary = ''
+  fdesc = "%s. %s" % (summary, desc) if summary and desc else summary if summary else desc if desc else ''
+
+  if args.verbose > 0:
+    print("%sAlbum: (%d) %s: %s" % (indent, id, title, fdesc))
+  if keywords and args.verbose > 2:
+    print("%s kw: %s" % (indent, keywords))
+
+  children = do_albums(conn, path, (id, title), indent + '  ')
+  if not children:
+    if args.verbose > 1:
+      print("%s Skipping %s, no photos" % (indent, title)) 
+    return
+
+  if args.noact:
+    if args.verbose > 2:
+      print("%s Would Add Photos: %r" % (indent, ','.join(children)))
+  else:
+    album_resp = flickr.photosets.create(title=title, description=fdesc, primary_photo_id=children[0])
+    album_id = album_resp.photoset[0]['id']
+    if args.verbose > 3:
+      print("%s Created: %s" % (indent, album_id)) 
+    for c in children[1:]:
+      flickr.photosets.addPhoto(photoset_id=album_id, photo_id=c)
+    if args.verbose > 2:
+      print("%s Added Photos: %s" % (indent, ','.join(children))) 
+
+def do_albums(conn, abspath, parent, indent=''):
+  flickr_images = []
+  with conn.cursor() as images:
+    try:
+      images.execute(sql, ('GalleryPhotoItem', parent[0]))
+      for (id, title, desc, summary, keywords, component, create_ts, exif_ts) in images:
+        path = os.path.join(abspath, component) if component else abspath
+
+        if summary == 'dave':
+          summary = ''
+        fdesc = "%s. %s" % (summary, desc) if summary and desc else summary if summary else desc if desc else ''
+
+        if args.verbose > 1:
+          print("%s  Image: (%d) %s: %s" % (indent, id, title, fdesc)) 
+        if keywords and args.verbose > 2:
+          print("%s   kw: %s" % (indent, keywords))
+        if args.verbose > 3:
+          print("%s   %s" % (indent, path))
+
+        try:
+          if args.noact:
+            state = os.stat(path)
+            if args.verbose > 3:
+              print("%s   Size: %s" % (indent, stat.st_size))
+            flickr_images.append(str(id))
+          else:
+            upload_resp = flickr.upload(filename=path, title=title, description=fdesc, tags=keywords, is_public=0)
+            photo_id = upload_resp.photoid[0].text
+            info_resp = flickr.photos.getInfo(photo_id=photo_id)
+            taken = datetime.strptime(info_resp.photo[0].dates[0]['taken'], '%Y-%m-%d %H:%M:%S')
+
+            if args.verbose > 3:
+              print("%s  Uploaded: %s Taken: %s" % (indent, photo_id, taken))
+            if taken < datetime(1980, 1, 1) or taken > (datetime.now() - timedelta(days=1)):
+              new_date = exif_ts if int(exif_ts) > 1000 else create_ts
+              if args.verbose > 1:
+                print("%s  Resetting date to %s" % (indent, datetime.fromtimestamp(new_date)))
+              flickr.photos.setDates(photo_id = photo_id, date_taken=new_date)
+            flickr_images.append(photo_id)
+        except Exception as err:
+          print err
+    except Exception as err:
+      print err
+  with conn.cursor() as albums:
+    try:
+      albums.execute(sql, ('GalleryAlbumItem', parent[0]))
+      for a in albums:
+        create_album(conn, abspath, parent[1], a, indent)
+    except Exception as err:
+      print err
+
+  return flickr_images
+
+if not flickr.token_valid(perms=u'write'):
+    flickr.get_request_token(oauth_callback=u'oob')
+    print("Authenticate: %s" % flickr.auth_url(perms=u'write'))
+    verifier = unicode(raw_input('Verifier code: '))
+    flickr.get_access_token(verifier)
+
+conn = dbapi2.connect(config.get('gallery2', 'database')) #database='gallery2', host='localhost', user='www-data', password='web')
+try:
+  if args.album:
+    for a in args.album:
+      id = a
+      abstitle = ''
+      abspath = ''
+      album = None
+      while id != 7:
+        with conn.cursor() as albums:
+          albums.execute("""SELECT e.g_id, i.g_title, i.g_description, i.g_summary, i.g_keywords, f.g_pathcomponent, e.g_creationtimestamp, i.g_originationtimestamp,
+                                c.g_parentid
+                              FROM g2_entity AS e 
+                              INNER JOIN g2_item i ON i.g_id = e.g_id
+                              INNER JOIN g2_childentity c ON c.g_id = e.g_id
+                              INNER JOIN g2_filesystementity f ON f.g_id = e.g_id
+                              WHERE e.g_entitytype=%s AND e.g_id=%s""",
+                            ('GalleryAlbumItem', id))
+          record = albums.fetchone()
+          (junk, title, junk, junk, junk, component, junk, junk, parent) = record
+          if a == id:
+            album = record
+          else:
+            abspath = os.path.join(component, abspath) if component else abspath
+            abstitle = ' - '.join((title, abstitle)) if abstitle else title
+          id = parent
+      create_album(conn, os.path.join(config.get('gallery2', 'album_dir'), abspath), abstitle, album[:-1])
+  else:
+    do_albums(conn, config.get('gallery2', 'album_dir'), (7, None))
+except KeyboardInterrupt:
+  pass
+finally:
+  conn.close()
