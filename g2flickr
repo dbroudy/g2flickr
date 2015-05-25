@@ -12,10 +12,11 @@ urllib3.disable_warnings()
 
 
 arg_parser = argparse.ArgumentParser()
-arg_parser.add_argument("-v", "--verbose", help="Print status information. Used multiple times to increase verbosity", action="count")
-arg_parser.add_argument("-a", "--album", help="upload only specified album. Can be used multiple times", action="append", type=int)
-arg_parser.add_argument("-n", "--noact", help="do not upload anything to flickr", action="store_true")
-arg_parser.add_argument("-c", "--config", help="configuration file (defaults to ./g2flickr.cfg)", type=str, default='g2flickr.cfg')
+arg_parser.add_argument("-v", "--verbose", help="Print status information. Used multiple times to increase verbosity.", action="count")
+arg_parser.add_argument("-n", "--noact", help="Do not upload anything to flickr", action="store_true")
+arg_parser.add_argument("-c", "--config", help="Configuration file (defaults to ./g2flickr.cfg)", type=str, default='g2flickr.cfg')
+arg_parser.add_argument("-a", "--album", help="Upload only specified album. Can be used multiple times.", action="append", type=int)
+arg_parser.add_argument("action", help="Action to perform", choices=('upload',))
 
 args = arg_parser.parse_args()
 
@@ -127,34 +128,38 @@ if not flickr.token_valid(perms=u'write'):
     flickr.get_access_token(verifier)
 
 conn = dbapi2.connect(config.get('gallery2', 'database')) #database='gallery2', host='localhost', user='www-data', password='web')
+
 try:
-  if args.album:
-    for a in args.album:
-      id = a
-      abstitle = ''
-      abspath = ''
-      album = None
-      while id != 7:
-        with conn.cursor() as albums:
-          albums.execute("""SELECT e.g_id, i.g_title, i.g_description, i.g_summary, i.g_keywords, f.g_pathcomponent, e.g_creationtimestamp, i.g_originationtimestamp,
-                                c.g_parentid
-                              FROM g2_entity AS e 
-                              INNER JOIN g2_item i ON i.g_id = e.g_id
-                              INNER JOIN g2_childentity c ON c.g_id = e.g_id
-                              INNER JOIN g2_filesystementity f ON f.g_id = e.g_id
-                              WHERE e.g_entitytype=%s AND e.g_id=%s""",
-                            ('GalleryAlbumItem', id))
-          record = albums.fetchone()
-          (junk, title, junk, junk, junk, component, junk, junk, parent) = record
-          if a == id:
-            album = record
-          else:
-            abspath = os.path.join(component, abspath) if component else abspath
-            abstitle = ' - '.join((title, abstitle)) if abstitle else title
-          id = parent
-      create_album(conn, os.path.join(config.get('gallery2', 'album_dir'), abspath), abstitle, album[:-1])
+  if args.action == 'upload':
+    if args.album:
+      for a in args.album:
+        id = a
+        abstitle = ''
+        abspath = ''
+        album = None
+        while id != 7:
+          with conn.cursor() as albums:
+            albums.execute("""SELECT e.g_id, i.g_title, i.g_description, i.g_summary, i.g_keywords, f.g_pathcomponent, e.g_creationtimestamp, i.g_originationtimestamp,
+                                  c.g_parentid
+                                FROM g2_entity AS e 
+                                INNER JOIN g2_item i ON i.g_id = e.g_id
+                                INNER JOIN g2_childentity c ON c.g_id = e.g_id
+                                INNER JOIN g2_filesystementity f ON f.g_id = e.g_id
+                                WHERE e.g_entitytype=%s AND e.g_id=%s""",
+                              ('GalleryAlbumItem', id))
+            record = albums.fetchone()
+            (junk, title, junk, junk, junk, component, junk, junk, parent) = record
+            if a == id:
+              album = record
+            else:
+              abspath = os.path.join(component, abspath) if component else abspath
+              abstitle = ' - '.join((title, abstitle)) if abstitle else title
+            id = parent
+        create_album(conn, os.path.join(config.get('gallery2', 'album_dir'), abspath), abstitle, album[:-1])
+    else:
+      do_albums(conn, config.get('gallery2', 'album_dir'), (7, None))
   else:
-    do_albums(conn, config.get('gallery2', 'album_dir'), (7, None))
+    print("Unknown action %s" % args.action)
 except KeyboardInterrupt:
   pass
 finally:
