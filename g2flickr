@@ -127,7 +127,7 @@ if not flickr.token_valid(perms=u'write'):
     verifier = unicode(raw_input('Verifier code: '))
     flickr.get_access_token(verifier)
 
-conn = dbapi2.connect(config.get('gallery2', 'database')) #database='gallery2', host='localhost', user='www-data', password='web')
+conn = dbapi2.connect(config.get('gallery2', 'database'))
 
 try:
   if args.action == 'upload':
